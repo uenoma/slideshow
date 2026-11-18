@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
@@ -37,12 +38,16 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
   final FocusNode _focusNode = FocusNode();
   final FocusNode _intervalFocusNode = FocusNode(canRequestFocus: false);
   final ScrollController _thumbnailScrollController = ScrollController();
+  final Map<String, Uint8List> _imageBytesCache = {};
   String? _selectedDirectory;
   List<_SlideImage> _images = const [];
   int _currentIndex = 0;
   int _intervalSeconds = 5;
   bool _isPlaying = false;
+  bool _isZoomed = false;
+  bool _areControlsVisible = true;
   Timer? _timer;
+  Timer? _controlsHideTimer;
   bool _isLoading = false;
 
   @override
@@ -58,8 +63,47 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
     _focusNode.dispose();
     _intervalFocusNode.dispose();
     _thumbnailScrollController.dispose();
+    _imageBytesCache.clear();
     _timer?.cancel();
+    _controlsHideTimer?.cancel();
     super.dispose();
+  }
+
+  void _restoreMainFocus() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _focusNode.requestFocus();
+      }
+    });
+  }
+
+  void _onUserInteraction() {
+    if (!_isPlaying || _isLoading || _images.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _areControlsVisible = true;
+    });
+
+    _controlsHideTimer?.cancel();
+    _controlsHideTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _areControlsVisible = false;
+      });
+    });
+  }
+
+  ImageProvider<Object> _imageProviderFor(String path) {
+    final bytes = _imageBytesCache[path];
+    if (bytes == null) {
+      return FileImage(File(path));
+    }
+    return MemoryImage(bytes);
   }
 
   Future<void> _pickFolder() async {
@@ -68,11 +112,16 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
       return;
     }
 
+    _imageBytesCache.clear();
+
     setState(() {
       _selectedDirectory = directoryPath;
       _isLoading = true;
       _isPlaying = false;
+      _isZoomed = false;
+      _areControlsVisible = true;
       _timer?.cancel();
+      _controlsHideTimer?.cancel();
       _currentIndex = 0;
     });
 
@@ -86,8 +135,18 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
       _images = images;
       _isLoading = false;
       _isPlaying = images.isNotEmpty;
+      _areControlsVisible = images.isNotEmpty;
     });
 
+    if (_isPlaying) {
+      _controlsHideTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) {
+          setState(() {
+            _areControlsVisible = false;
+          });
+        }
+      });
+    }
     _restartTimer();
   }
 
@@ -108,6 +167,8 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
     for (final file in files) {
       try {
         final stat = await file.stat();
+        final bytes = await file.readAsBytes();
+        _imageBytesCache[file.path] = bytes;
         imageFiles.add(
           _SlideImage(path: file.path, lastModified: stat.modified),
         );
@@ -152,10 +213,32 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
   }
 
   void _togglePlayback() {
+    _focusNode.requestFocus();
     setState(() {
       _isPlaying = !_isPlaying;
+      _areControlsVisible = true;
     });
+    _controlsHideTimer?.cancel();
+    if (_isPlaying) {
+      _controlsHideTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) {
+          setState(() {
+            _areControlsVisible = false;
+          });
+        }
+      });
+    }
     _restartTimer();
+  }
+
+  void _togglePreviewZoom() {
+    if (_images.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _isZoomed = !_isZoomed;
+    });
   }
 
   void _toggleMarkCurrent() {
@@ -228,6 +311,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
 
     setState(() {
       _currentIndex = (_currentIndex - 1 + _images.length) % _images.length;
+      _isZoomed = false;
     });
     _scrollThumbnailIntoView();
   }
@@ -239,6 +323,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
 
     setState(() {
       _currentIndex = (_currentIndex + 1) % _images.length;
+      _isZoomed = false;
     });
     _scrollThumbnailIntoView();
   }
@@ -276,6 +361,8 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
           return;
         }
 
+        _onUserInteraction();
+
         if (event.logicalKey == LogicalKeyboardKey.space) {
           _togglePlayback();
           return;
@@ -296,241 +383,306 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
           _showPrevious();
         }
       },
-      child: Scaffold(
-        backgroundColor: Colors.black,
-        body: Stack(
-          children: [
-            if (currentImage != null)
-              Positioned.fill(
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 500),
-                  child: Image.file(
-                    File(currentImage.path),
-                    key: ValueKey<String>(currentImage.path),
-                    fit: BoxFit.contain,
-                    gaplessPlayback: true,
+      child: MouseRegion(
+        onHover: (_) => _onUserInteraction(),
+        child: GestureDetector(
+          onTap: _onUserInteraction,
+          child: Scaffold(
+            backgroundColor: Colors.black,
+            body: Stack(
+              children: [
+                if (currentImage != null)
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _togglePreviewZoom,
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 500),
+                        child: _isZoomed
+                            ? ClipRect(
+                                key: ValueKey<String>('zoom-${currentImage.path}'),
+                                child: InteractiveViewer(
+                                  constrained: false,
+                                  panEnabled: true,
+                                  scaleEnabled: true,
+                                  minScale: 1,
+                                  maxScale: 4,
+                                  boundaryMargin: const EdgeInsets.all(32),
+                                  child: Image(
+                                    image: _imageProviderFor(currentImage.path),
+                                    fit: BoxFit.none,
+                                    alignment: Alignment.center,
+                                    gaplessPlayback: true,
+                                  ),
+                                ),
+                              )
+                            : Image(
+                                key: ValueKey<String>(currentImage.path),
+                                image: _imageProviderFor(currentImage.path),
+                                fit: BoxFit.contain,
+                                gaplessPlayback: true,
+                              ),
+                      ),
+                    ),
+                  )
+                else
+                  Positioned.fill(
+                    child: Container(
+                      color: Colors.black,
+                      child: const Center(
+                        child: Text(
+                          'フォルダーを選択してスライドショーを開始',
+                          style: TextStyle(color: Colors.white, fontSize: 24),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-              )
-            else
-              Positioned.fill(
-                child: Container(
-                  color: Colors.black,
-                  child: const Center(
-                    child: Text(
-                      'フォルダーを選択してスライドショーを開始',
-                      style: TextStyle(color: Colors.white, fontSize: 24),
+                if (currentImage != null && currentImage.marked)
+                  Positioned(
+                    top: 100,
+                    right: 24,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.5),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.check, color: Colors.white),
+                          SizedBox(width: 6),
+                          Text('マーク済み', style: TextStyle(color: Colors.white)),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (_isLoading)
+                  const Positioned.fill(
+                    child: ColoredBox(
+                      color: Color.fromARGB(120, 0, 0, 0),
+                      child: Center(
+                        child: CircularProgressIndicator(color: Colors.white),
+                      ),
+                    ),
+                  ),
+                if (_images.isNotEmpty)
+                  Positioned(
+                    top: 80,
+                    bottom: 100,
+                    left: 16,
+                    child: IgnorePointer(
+                      ignoring: !_areControlsVisible,
+                      child: AnimatedOpacity(
+                        opacity: _areControlsVisible ? 1 : 0.2,
+                        duration: const Duration(milliseconds: 200),
+                        child: Container(
+                          width: 180,
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.45),
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: ListView.builder(
+                            controller: _thumbnailScrollController,
+                            itemCount: _images.length,
+                            itemBuilder: (context, index) {
+                              final image = _images[index];
+                              final isSelected = index == _currentIndex;
+                              return GestureDetector(
+                                onTap: () {
+                                  _restoreMainFocus();
+                                  setState(() {
+                                    _currentIndex = index;
+                                    _isZoomed = false;
+                                  });
+                                  _scrollThumbnailIntoView();
+                                  _onUserInteraction();
+                                },
+                                child: Container(
+                                  margin: const EdgeInsets.only(bottom: 8),
+                                  padding: const EdgeInsets.all(4),
+                                  decoration: BoxDecoration(
+                                    color: isSelected
+                                        ? Colors.blue.withOpacity(0.3)
+                                        : Colors.transparent,
+                                    border: Border.all(
+                                      color: isSelected
+                                          ? Colors.blue
+                                          : Colors.white.withOpacity(0.2),
+                                    ),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Stack(
+                                    children: [
+                                      ClipRRect(
+                                        borderRadius: BorderRadius.circular(8),
+                                        child: Image(
+                                          image: _imageProviderFor(image.path),
+                                          width: double.infinity,
+                                          height: 110,
+                                          fit: BoxFit.cover,
+                                        ),
+                                      ),
+                                      if (image.marked)
+                                        Positioned(
+                                          top: 6,
+                                          right: 6,
+                                          child: Container(
+                                            padding: const EdgeInsets.all(4),
+                                            decoration: const BoxDecoration(
+                                              color: Colors.green,
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: const Icon(
+                                              Icons.check,
+                                              size: 14,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                Positioned(
+                  top: 20,
+                  left: 20,
+                  right: 20,
+                  child: AnimatedOpacity(
+                    opacity: _areControlsVisible ? 1 : 0,
+                    duration: const Duration(milliseconds: 200),
+                    child: IgnorePointer(
+                      ignoring: !_areControlsVisible,
+                      child: SafeArea(
+                        child: Row(
+                          children: [
+                            FilledButton.icon(
+                              onPressed: _pickFolder,
+                              icon: const Icon(Icons.folder_open),
+                              label: const Text('フォルダーを選択'),
+                            ),
+                            const SizedBox(width: 16),
+                            Flexible(
+                              child: Text(
+                                _selectedDirectory ?? '未選択',
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            if (currentImage != null && currentImage.marked)
-              Positioned(
-                top: 100,
-                right: 24,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.5),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.check, color: Colors.white),
-                      SizedBox(width: 6),
-                      Text('マーク済み', style: TextStyle(color: Colors.white)),
-                    ],
-                  ),
-                ),
-              ),
-            if (_isLoading)
-              const Positioned.fill(
-                child: ColoredBox(
-                  color: Color.fromARGB(120, 0, 0, 0),
-                  child: Center(
-                    child: CircularProgressIndicator(color: Colors.white),
-                  ),
-                ),
-              ),
-            if (_images.isNotEmpty)
-              Positioned(
-                top: 80,
-                bottom: 100,
-                left: 16,
-                child: Container(
-                  width: 180,
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.45),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: ListView.builder(
-                    controller: _thumbnailScrollController,
-                    itemCount: _images.length,
-                    itemBuilder: (context, index) {
-                      final image = _images[index];
-                      final isSelected = index == _currentIndex;
-                      return GestureDetector(
-                        onTap: () {
-                          setState(() {
-                            _currentIndex = index;
-                          });
-                          _scrollThumbnailIntoView();
-                        },
+                Positioned(
+                  bottom: 24,
+                  left: 0,
+                  right: 0,
+                  child: AnimatedOpacity(
+                    opacity: _areControlsVisible ? 1 : 0,
+                    duration: const Duration(milliseconds: 200),
+                    child: IgnorePointer(
+                      ignoring: !_areControlsVisible,
+                      child: Center(
                         child: Container(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          padding: const EdgeInsets.all(4),
-                          decoration: BoxDecoration(
-                            color: isSelected
-                                ? Colors.blue.withOpacity(0.3)
-                                : Colors.transparent,
-                            border: Border.all(
-                              color: isSelected
-                                  ? Colors.blue
-                                  : Colors.white.withOpacity(0.2),
-                            ),
-                            borderRadius: BorderRadius.circular(8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 12,
                           ),
-                          child: Stack(
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.45),
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(8),
-                                child: Image.file(
-                                  File(image.path),
-                                  width: double.infinity,
-                                  height: 110,
-                                  fit: BoxFit.cover,
+                              IconButton(
+                                onPressed: () {
+                                  _restoreMainFocus();
+                                  _showPrevious();
+                                },
+                                icon: const Icon(
+                                  Icons.skip_previous,
+                                  color: Colors.white,
                                 ),
                               ),
-                              if (image.marked)
-                                Positioned(
-                                  top: 6,
-                                  right: 6,
-                                  child: Container(
-                                    padding: const EdgeInsets.all(4),
-                                    decoration: const BoxDecoration(
-                                      color: Colors.green,
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: const Icon(
-                                      Icons.check,
-                                      size: 14,
-                                      color: Colors.white,
-                                    ),
-                                  ),
+                              IconButton(
+                                onPressed: () {
+                                  _restoreMainFocus();
+                                  _togglePlayback();
+                                },
+                                icon: Icon(
+                                  _isPlaying ? Icons.pause : Icons.play_arrow,
+                                  color: Colors.white,
                                 ),
+                              ),
+                              IconButton(
+                                onPressed: () {
+                                  _restoreMainFocus();
+                                  _showNext();
+                                },
+                                icon: const Icon(Icons.skip_next, color: Colors.white),
+                              ),
+                              const SizedBox(width: 12),
+                              const Icon(Icons.timer, color: Colors.white),
+                              const SizedBox(width: 8),
+                              DropdownButton<int>(
+                                focusNode: _intervalFocusNode,
+                                value: _intervalSeconds,
+                                dropdownColor: Colors.black87,
+                                underline: const SizedBox(),
+                                style: const TextStyle(color: Colors.white),
+                                items: [1, 2, 3, 5, 10, 15, 30, 60]
+                                    .map(
+                                      (value) => DropdownMenuItem<int>(
+                                        value: value,
+                                        child: Text('${value}秒'),
+                                      ),
+                                    )
+                                    .toList(),
+                                onChanged: (value) {
+                                  _restoreMainFocus();
+                                  if (value != null) {
+                                    _setIntervalSeconds(value);
+                                  }
+                                },
+                              ),
+                              const SizedBox(width: 12),
+                              if (_images.isNotEmpty)
+                                Text(
+                                  '${_currentIndex + 1} / ${_images.length}',
+                                  style: const TextStyle(color: Colors.white),
+                                ),
+                              const SizedBox(width: 12),
+                              FilledButton.icon(
+                                onPressed: () {
+                                  _restoreMainFocus();
+                                  _copyMarkedImages();
+                                },
+                                icon: const Icon(Icons.copy_all),
+                                label: const Text('コピー'),
+                              ),
                             ],
                           ),
                         ),
-                      );
-                    },
-                  ),
-                ),
-              ),
-            Positioned(
-              top: 20,
-              left: 20,
-              right: 20,
-              child: SafeArea(
-                child: Row(
-                  children: [
-                    FilledButton.icon(
-                      onPressed: _pickFolder,
-                      icon: const Icon(Icons.folder_open),
-                      label: const Text('フォルダーを選択'),
-                    ),
-                    const SizedBox(width: 16),
-                    Flexible(
-                      child: Text(
-                        _selectedDirectory ?? '未選択',
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Colors.white),
                       ),
                     ),
-                  ],
-                ),
-              ),
-            ),
-            Positioned(
-              bottom: 24,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 12,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.45),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        onPressed: _showPrevious,
-                        icon: const Icon(
-                          Icons.skip_previous,
-                          color: Colors.white,
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: _togglePlayback,
-                        icon: Icon(
-                          _isPlaying ? Icons.pause : Icons.play_arrow,
-                          color: Colors.white,
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: _showNext,
-                        icon: const Icon(Icons.skip_next, color: Colors.white),
-                      ),
-                      const SizedBox(width: 12),
-                      const Icon(Icons.timer, color: Colors.white),
-                      const SizedBox(width: 8),
-                      DropdownButton<int>(
-                        focusNode: _intervalFocusNode,
-                        value: _intervalSeconds,
-                        dropdownColor: Colors.black87,
-                        underline: const SizedBox(),
-                        style: const TextStyle(color: Colors.white),
-                        items: [1, 2, 3, 5, 10, 15, 30, 60]
-                            .map(
-                              (value) => DropdownMenuItem<int>(
-                                value: value,
-                                child: Text('${value}秒'),
-                              ),
-                            )
-                            .toList(),
-                        onChanged: (value) {
-                          if (value != null) {
-                            _setIntervalSeconds(value);
-                          }
-                        },
-                      ),
-                      const SizedBox(width: 12),
-                      if (_images.isNotEmpty)
-                        Text(
-                          '${_currentIndex + 1} / ${_images.length}',
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                      const SizedBox(width: 12),
-                      FilledButton.icon(
-                        onPressed: _copyMarkedImages,
-                        icon: const Icon(Icons.copy_all),
-                        label: const Text('コピー'),
-                      ),
-                    ],
                   ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
