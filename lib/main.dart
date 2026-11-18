@@ -438,12 +438,14 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
           return;
         }
 
-        if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+        if (event.logicalKey == LogicalKeyboardKey.arrowRight ||
+            event.logicalKey == LogicalKeyboardKey.arrowDown) {
           _showNext();
           return;
         }
 
-        if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+        if (event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+            event.logicalKey == LogicalKeyboardKey.arrowUp) {
           _showPrevious();
         }
       },
