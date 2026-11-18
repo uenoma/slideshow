@@ -35,6 +35,7 @@ class SlideshowHomePage extends StatefulWidget {
 
 class _SlideshowHomePageState extends State<SlideshowHomePage> {
   final FocusNode _focusNode = FocusNode();
+  final FocusNode _intervalFocusNode = FocusNode(canRequestFocus: false);
   final ScrollController _thumbnailScrollController = ScrollController();
   String? _selectedDirectory;
   List<_SlideImage> _images = const [];
@@ -55,6 +56,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
   @override
   void dispose() {
     _focusNode.dispose();
+    _intervalFocusNode.dispose();
     _thumbnailScrollController.dispose();
     _timer?.cancel();
     super.dispose();
@@ -275,6 +277,12 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
         }
 
         if (event.logicalKey == LogicalKeyboardKey.space) {
+          _togglePlayback();
+          return;
+        }
+
+        if (event.logicalKey == LogicalKeyboardKey.digit1 ||
+            event.logicalKey == LogicalKeyboardKey.numpad1) {
           _toggleMarkCurrent();
           return;
         }
@@ -486,6 +494,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
                       const Icon(Icons.timer, color: Colors.white),
                       const SizedBox(width: 8),
                       DropdownButton<int>(
+                        focusNode: _intervalFocusNode,
                         value: _intervalSeconds,
                         dropdownColor: Colors.black87,
                         underline: const SizedBox(),
