@@ -1,0 +1,541 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:file_selector/file_selector.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+void main() {
+  runApp(const SlideshowApp());
+}
+
+class SlideshowApp extends StatelessWidget {
+  const SlideshowApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Slideshow',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueGrey),
+        useMaterial3: true,
+      ),
+      home: const SlideshowHomePage(),
+    );
+  }
+}
+
+class SlideshowHomePage extends StatefulWidget {
+  const SlideshowHomePage({super.key});
+
+  @override
+  State<SlideshowHomePage> createState() => _SlideshowHomePageState();
+}
+
+class _SlideshowHomePageState extends State<SlideshowHomePage> {
+  final FocusNode _focusNode = FocusNode();
+  final ScrollController _thumbnailScrollController = ScrollController();
+  String? _selectedDirectory;
+  List<_SlideImage> _images = const [];
+  int _currentIndex = 0;
+  int _intervalSeconds = 5;
+  bool _isPlaying = false;
+  Timer? _timer;
+  bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _focusNode.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    _thumbnailScrollController.dispose();
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _pickFolder() async {
+    final String? directoryPath = await getDirectoryPath();
+    if (directoryPath == null) {
+      return;
+    }
+
+    setState(() {
+      _selectedDirectory = directoryPath;
+      _isLoading = true;
+      _isPlaying = false;
+      _timer?.cancel();
+      _currentIndex = 0;
+    });
+
+    final images = await _loadImageFiles(directoryPath);
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _images = images;
+      _isLoading = false;
+      _isPlaying = images.isNotEmpty;
+    });
+
+    _restartTimer();
+  }
+
+  Future<List<_SlideImage>> _loadImageFiles(String directoryPath) async {
+    final directory = Directory(directoryPath);
+    if (!await directory.exists()) {
+      return const [];
+    }
+
+    final files = directory
+        .listSync(followLinks: false)
+        .whereType<File>()
+        .where((file) => _isImageFile(file.path))
+        .toList();
+
+    final imageFiles = <_SlideImage>[];
+
+    for (final file in files) {
+      try {
+        final stat = await file.stat();
+        imageFiles.add(
+          _SlideImage(path: file.path, lastModified: stat.modified),
+        );
+      } on FileSystemException {
+        imageFiles.add(
+          _SlideImage(path: file.path, lastModified: DateTime.now()),
+        );
+      }
+    }
+
+    imageFiles.sort((a, b) => a.lastModified.compareTo(b.lastModified));
+    return imageFiles;
+  }
+
+  bool _isImageFile(String path) {
+    final lower = path.toLowerCase();
+    return lower.endsWith('.png') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.bmp') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp');
+  }
+
+  void _restartTimer() {
+    _timer?.cancel();
+
+    if (!_isPlaying || _images.isEmpty) {
+      return;
+    }
+
+    _timer = Timer.periodic(Duration(seconds: _intervalSeconds), (_) {
+      if (!mounted || _images.isEmpty) {
+        return;
+      }
+
+      setState(() {
+        _currentIndex = (_currentIndex + 1) % _images.length;
+      });
+      _scrollThumbnailIntoView();
+    });
+  }
+
+  void _togglePlayback() {
+    setState(() {
+      _isPlaying = !_isPlaying;
+    });
+    _restartTimer();
+  }
+
+  void _toggleMarkCurrent() {
+    if (_images.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _images[_currentIndex].marked = !_images[_currentIndex].marked;
+    });
+  }
+
+  Future<void> _copyMarkedImages() async {
+    final markedImages = _images.where((image) => image.marked).toList();
+    if (markedImages.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('マークされた画像がありません')));
+      return;
+    }
+
+    final destinationPath = await getDirectoryPath();
+    if (destinationPath == null) {
+      return;
+    }
+
+    final destinationDirectory = Directory(destinationPath);
+    if (!await destinationDirectory.exists()) {
+      await destinationDirectory.create(recursive: true);
+    }
+
+    var copiedCount = 0;
+    for (final image in markedImages) {
+      final sourceFile = File(image.path);
+      if (!await sourceFile.exists()) {
+        continue;
+      }
+
+      final fileName = image.path.split(Platform.pathSeparator).last;
+      final targetPath =
+          '${destinationDirectory.path}${Platform.pathSeparator}$fileName';
+      await sourceFile.copy(targetPath);
+      copiedCount++;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('$copiedCount件の画像をコピーしました')));
+  }
+
+  void _setIntervalSeconds(int value) {
+    if (value < 1) {
+      return;
+    }
+
+    setState(() {
+      _intervalSeconds = value;
+    });
+    if (_isPlaying) {
+      _restartTimer();
+    }
+  }
+
+  void _showPrevious() {
+    if (_images.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _currentIndex = (_currentIndex - 1 + _images.length) % _images.length;
+    });
+    _scrollThumbnailIntoView();
+  }
+
+  void _showNext() {
+    if (_images.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _currentIndex = (_currentIndex + 1) % _images.length;
+    });
+    _scrollThumbnailIntoView();
+  }
+
+  void _scrollThumbnailIntoView() {
+    if (_images.isEmpty || _thumbnailScrollController.hasClients == false) {
+      return;
+    }
+
+    final itemHeight = 118.0;
+    final targetOffset = (_currentIndex * itemHeight) - 90;
+    final maxScrollExtent = _thumbnailScrollController.position.maxScrollExtent;
+    final clampedOffset = targetOffset.clamp(0.0, maxScrollExtent);
+
+    _thumbnailScrollController.animateTo(
+      clampedOffset,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeInOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final currentImage = _images.isEmpty ? null : _images[_currentIndex];
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollThumbnailIntoView();
+    });
+
+    return KeyboardListener(
+      focusNode: _focusNode,
+      autofocus: true,
+      onKeyEvent: (event) {
+        if (event is! KeyDownEvent) {
+          return;
+        }
+
+        if (event.logicalKey == LogicalKeyboardKey.space) {
+          _toggleMarkCurrent();
+          return;
+        }
+
+        if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+          _showNext();
+          return;
+        }
+
+        if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+          _showPrevious();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(
+          children: [
+            if (currentImage != null)
+              Positioned.fill(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 500),
+                  child: Image.file(
+                    File(currentImage.path),
+                    key: ValueKey<String>(currentImage.path),
+                    fit: BoxFit.contain,
+                    gaplessPlayback: true,
+                  ),
+                ),
+              )
+            else
+              Positioned.fill(
+                child: Container(
+                  color: Colors.black,
+                  child: const Center(
+                    child: Text(
+                      'フォルダーを選択してスライドショーを開始',
+                      style: TextStyle(color: Colors.white, fontSize: 24),
+                    ),
+                  ),
+                ),
+              ),
+            if (currentImage != null && currentImage.marked)
+              Positioned(
+                top: 100,
+                right: 24,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.check, color: Colors.white),
+                      SizedBox(width: 6),
+                      Text('マーク済み', style: TextStyle(color: Colors.white)),
+                    ],
+                  ),
+                ),
+              ),
+            if (_isLoading)
+              const Positioned.fill(
+                child: ColoredBox(
+                  color: Color.fromARGB(120, 0, 0, 0),
+                  child: Center(
+                    child: CircularProgressIndicator(color: Colors.white),
+                  ),
+                ),
+              ),
+            if (_images.isNotEmpty)
+              Positioned(
+                top: 80,
+                bottom: 100,
+                left: 16,
+                child: Container(
+                  width: 180,
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.45),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: ListView.builder(
+                    controller: _thumbnailScrollController,
+                    itemCount: _images.length,
+                    itemBuilder: (context, index) {
+                      final image = _images[index];
+                      final isSelected = index == _currentIndex;
+                      return GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _currentIndex = index;
+                          });
+                          _scrollThumbnailIntoView();
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: isSelected
+                                ? Colors.blue.withOpacity(0.3)
+                                : Colors.transparent,
+                            border: Border.all(
+                              color: isSelected
+                                  ? Colors.blue
+                                  : Colors.white.withOpacity(0.2),
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Stack(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.file(
+                                  File(image.path),
+                                  width: double.infinity,
+                                  height: 110,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                              if (image.marked)
+                                Positioned(
+                                  top: 6,
+                                  right: 6,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(4),
+                                    decoration: const BoxDecoration(
+                                      color: Colors.green,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(
+                                      Icons.check,
+                                      size: 14,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            Positioned(
+              top: 20,
+              left: 20,
+              right: 20,
+              child: SafeArea(
+                child: Row(
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _pickFolder,
+                      icon: const Icon(Icons.folder_open),
+                      label: const Text('フォルダーを選択'),
+                    ),
+                    const SizedBox(width: 16),
+                    Flexible(
+                      child: Text(
+                        _selectedDirectory ?? '未選択',
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: 24,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.45),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        onPressed: _showPrevious,
+                        icon: const Icon(
+                          Icons.skip_previous,
+                          color: Colors.white,
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _togglePlayback,
+                        icon: Icon(
+                          _isPlaying ? Icons.pause : Icons.play_arrow,
+                          color: Colors.white,
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _showNext,
+                        icon: const Icon(Icons.skip_next, color: Colors.white),
+                      ),
+                      const SizedBox(width: 12),
+                      const Icon(Icons.timer, color: Colors.white),
+                      const SizedBox(width: 8),
+                      DropdownButton<int>(
+                        value: _intervalSeconds,
+                        dropdownColor: Colors.black87,
+                        underline: const SizedBox(),
+                        style: const TextStyle(color: Colors.white),
+                        items: [1, 2, 3, 5, 10, 15, 30, 60]
+                            .map(
+                              (value) => DropdownMenuItem<int>(
+                                value: value,
+                                child: Text('${value}秒'),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) {
+                          if (value != null) {
+                            _setIntervalSeconds(value);
+                          }
+                        },
+                      ),
+                      const SizedBox(width: 12),
+                      if (_images.isNotEmpty)
+                        Text(
+                          '${_currentIndex + 1} / ${_images.length}',
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      const SizedBox(width: 12),
+                      FilledButton.icon(
+                        onPressed: _copyMarkedImages,
+                        icon: const Icon(Icons.copy_all),
+                        label: const Text('コピー'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SlideImage {
+  _SlideImage({
+    required this.path,
+    required this.lastModified,
+    this.marked = false,
+  });
+
+  final String path;
+  final DateTime lastModified;
+  bool marked;
+}
