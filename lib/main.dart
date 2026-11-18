@@ -601,7 +601,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
                                           image: _imageProviderFor(image.path),
                                           width: double.infinity,
                                           height: 110,
-                                          fit: BoxFit.cover,
+                                          fit: BoxFit.contain,
                                         ),
                                       ),
                                       if (image.marked)
