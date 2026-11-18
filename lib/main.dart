@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
@@ -38,6 +39,8 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
   final FocusNode _focusNode = FocusNode();
   final FocusNode _intervalFocusNode = FocusNode(canRequestFocus: false);
   final ScrollController _thumbnailScrollController = ScrollController();
+  final TransformationController _previewTransformController =
+      TransformationController();
   final Map<String, Uint8List> _imageBytesCache = {};
   String? _selectedDirectory;
   List<_SlideImage> _images = const [];
@@ -113,6 +116,8 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
     }
 
     _imageBytesCache.clear();
+
+    _previewTransformController.value = Matrix4.identity();
 
     setState(() {
       _selectedDirectory = directoryPath;
@@ -231,13 +236,70 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
     _restartTimer();
   }
 
-  void _togglePreviewZoom() {
+  Future<Size> _getImageSize(String path) async {
+    final bytes = _imageBytesCache[path];
+    if (bytes == null) {
+      return Size.zero;
+    }
+
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    return Size(
+      frame.image.width.toDouble(),
+      frame.image.height.toDouble(),
+    );
+  }
+
+  Future<void> _togglePreviewZoom([Offset? localPosition, Size? viewportSize]) async {
     if (_images.isEmpty) {
       return;
     }
 
+    if (_isZoomed) {
+      _previewTransformController.value = Matrix4.identity();
+      setState(() {
+        _isZoomed = false;
+      });
+      return;
+    }
+
+    if (localPosition == null || viewportSize == null) {
+      setState(() {
+        _isZoomed = true;
+      });
+      return;
+    }
+
+    final imageSize = await _getImageSize(_images[_currentIndex].path);
+    if (!mounted || imageSize == Size.zero) {
+      setState(() {
+        _isZoomed = true;
+      });
+      return;
+    }
+
+    final fitScale = (viewportSize.width / imageSize.width)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final fitScaleY = (viewportSize.height / imageSize.height)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final scale = fitScale < fitScaleY ? fitScale : fitScaleY;
+    final displayWidth = imageSize.width * scale;
+    final displayHeight = imageSize.height * scale;
+    final offsetX = (viewportSize.width - displayWidth) / 2;
+    final offsetY = (viewportSize.height - displayHeight) / 2;
+
+    final clickedX = (localPosition.dx - offsetX) / scale;
+    final clickedY = (localPosition.dy - offsetY) / scale;
+    final translateX = viewportSize.width / 2 - clickedX;
+    final translateY = viewportSize.height / 2 - clickedY;
+
+    _previewTransformController.value = Matrix4.identity()
+      ..translate(translateX, translateY);
+
     setState(() {
-      _isZoomed = !_isZoomed;
+      _isZoomed = true;
     });
   }
 
@@ -309,6 +371,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
       return;
     }
 
+    _previewTransformController.value = Matrix4.identity();
     setState(() {
       _currentIndex = (_currentIndex - 1 + _images.length) % _images.length;
       _isZoomed = false;
@@ -321,6 +384,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
       return;
     }
 
+    _previewTransformController.value = Matrix4.identity();
     setState(() {
       _currentIndex = (_currentIndex + 1) % _images.length;
       _isZoomed = false;
@@ -393,36 +457,48 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
               children: [
                 if (currentImage != null)
                   Positioned.fill(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _togglePreviewZoom,
-                      child: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 500),
-                        child: _isZoomed
-                            ? ClipRect(
-                                key: ValueKey<String>('zoom-${currentImage.path}'),
-                                child: InteractiveViewer(
-                                  constrained: false,
-                                  panEnabled: true,
-                                  scaleEnabled: true,
-                                  minScale: 1,
-                                  maxScale: 4,
-                                  boundaryMargin: const EdgeInsets.all(32),
-                                  child: Image(
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        final viewportSize = constraints.biggest;
+                        return GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTapUp: (details) {
+                            _togglePreviewZoom(
+                              details.localPosition,
+                              viewportSize,
+                            );
+                          },
+                          child: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 500),
+                            child: _isZoomed
+                                ? ClipRect(
+                                    key: ValueKey<String>('zoom-${currentImage.path}'),
+                                    child: InteractiveViewer(
+                                      transformationController:
+                                          _previewTransformController,
+                                      constrained: false,
+                                      panEnabled: true,
+                                      scaleEnabled: true,
+                                      minScale: 1,
+                                      maxScale: 4,
+                                      boundaryMargin: const EdgeInsets.all(32),
+                                      child: Image(
+                                        image: _imageProviderFor(currentImage.path),
+                                        fit: BoxFit.none,
+                                        alignment: Alignment.center,
+                                        gaplessPlayback: true,
+                                      ),
+                                    ),
+                                  )
+                                : Image(
+                                    key: ValueKey<String>(currentImage.path),
                                     image: _imageProviderFor(currentImage.path),
-                                    fit: BoxFit.none,
-                                    alignment: Alignment.center,
+                                    fit: BoxFit.contain,
                                     gaplessPlayback: true,
                                   ),
-                                ),
-                              )
-                            : Image(
-                                key: ValueKey<String>(currentImage.path),
-                                image: _imageProviderFor(currentImage.path),
-                                fit: BoxFit.contain,
-                                gaplessPlayback: true,
-                              ),
-                      ),
+                          ),
+                        );
+                      },
                     ),
                   )
                 else
@@ -495,6 +571,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
                               return GestureDetector(
                                 onTap: () {
                                   _restoreMainFocus();
+                                  _previewTransformController.value = Matrix4.identity();
                                   setState(() {
                                     _currentIndex = index;
                                     _isZoomed = false;
