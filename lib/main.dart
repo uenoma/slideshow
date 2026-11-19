@@ -52,6 +52,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
   Timer? _timer;
   Timer? _controlsHideTimer;
   bool _isLoading = false;
+  int? _lastScrolledThumbnailIndex;
 
   @override
   void initState() {
@@ -128,6 +129,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
       _timer?.cancel();
       _controlsHideTimer?.cancel();
       _currentIndex = 0;
+      _lastScrolledThumbnailIndex = null;
     });
 
     final images = await _loadImageFiles(directoryPath);
@@ -142,6 +144,14 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
       _isPlaying = images.isNotEmpty;
       _areControlsVisible = images.isNotEmpty;
     });
+
+    if (_images.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _scrollThumbnailIntoView();
+        }
+      });
+    }
 
     if (_isPlaying) {
       _controlsHideTimer = Timer(const Duration(seconds: 3), () {
@@ -308,8 +318,28 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
       return;
     }
 
+    final preservedOffset = _thumbnailScrollController.hasClients
+        ? _thumbnailScrollController.offset
+        : null;
+
     setState(() {
       _images[_currentIndex].marked = !_images[_currentIndex].marked;
+    });
+
+    if (preservedOffset == null) {
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_thumbnailScrollController.hasClients) {
+        return;
+      }
+
+      final maxScrollExtent = _thumbnailScrollController.position.maxScrollExtent;
+      final clampedOffset = preservedOffset.clamp(0.0, maxScrollExtent);
+      if ((_thumbnailScrollController.offset - clampedOffset).abs() > 0.5) {
+        _thumbnailScrollController.jumpTo(clampedOffset);
+      }
     });
   }
 
@@ -397,25 +427,22 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
       return;
     }
 
+    if (_lastScrolledThumbnailIndex == _currentIndex) {
+      return;
+    }
+
     final itemHeight = 118.0;
     final targetOffset = (_currentIndex * itemHeight) - 90;
     final maxScrollExtent = _thumbnailScrollController.position.maxScrollExtent;
     final clampedOffset = targetOffset.clamp(0.0, maxScrollExtent);
 
-    _thumbnailScrollController.animateTo(
-      clampedOffset,
-      duration: const Duration(milliseconds: 250),
-      curve: Curves.easeInOut,
-    );
+    _lastScrolledThumbnailIndex = _currentIndex;
+    _thumbnailScrollController.jumpTo(clampedOffset);
   }
 
   @override
   Widget build(BuildContext context) {
     final currentImage = _images.isEmpty ? null : _images[_currentIndex];
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollThumbnailIntoView();
-    });
 
     return KeyboardListener(
       focusNode: _focusNode,
@@ -565,6 +592,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
                             borderRadius: BorderRadius.circular(16),
                           ),
                           child: ListView.builder(
+                            key: const PageStorageKey<String>('thumbnail-list'),
                             controller: _thumbnailScrollController,
                             itemCount: _images.length,
                             itemBuilder: (context, index) {
