@@ -141,7 +141,7 @@ class _SlideshowHomePageState extends State<SlideshowHomePage> {
     setState(() {
       _images = images;
       _isLoading = false;
-      _isPlaying = images.isNotEmpty;
+      _isPlaying = false;
       _areControlsVisible = images.isNotEmpty;
     });
 
